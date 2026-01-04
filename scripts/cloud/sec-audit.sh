@@ -57,12 +57,31 @@ else
 fi
 echo ""
 
+echo "--- 5. UFW firewall status ---"
+if command -v ufw &> /dev/null; then
+    echo "✅ UFW is installed"
+    if sudo systemctl is-active --quiet ufw; then
+        echo "✅ UFW is RUNNING"
+        echo ""
+        echo "UFW status:"
+        sudo ufw status
+    else
+        echo "❌ UFW is installed but NOT RUNNING"
+    fi
+else
+    echo "❌ UFW is NOT INSTALLED"
+fi
+echo ""
+
 echo "--- 5. RECENT SSH AUTHENTICATION ATTEMPTS ---"
 echo "Last 5 successful logins:"
 sudo grep "Accepted" /var/log/auth.log 2>/dev/null | tail -5
 echo ""
 echo "Recent failed login attempts:"
 sudo grep "Failed password\|authentication failure" /var/log/auth.log 2>/dev/null | tail -5
+echo ""
+echo "Attack attempts so far:"
+sudo grep "Failed password\|authentication failure" /var/log/auth.log 2>/dev/null | wc -l
 echo ""
 
 echo "--- 6. CURRENT SSH SESSIONS ---"
