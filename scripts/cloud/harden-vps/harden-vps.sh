@@ -116,10 +116,10 @@ BANNER
     
     # Display mode indicators
     local modes=""
-    [[ $DRY_RUN -eq 1 ]] && modes+="${C_MAGENTA}[DRY-RUN]${C_RESET} "
-    [[ $VERBOSE -eq 1 ]] && modes+="${C_BLUE}[VERBOSE]${C_RESET} "
-    [[ $AUTO_MODE -eq 1 ]] && modes+="${C_YELLOW}[AUTO]${C_RESET} "
-    [[ -n "$modes" ]] && echo -e "  Modes: $modes" && echo ""
+    [[ $DRY_RUN -eq 1 ]] && modes+="${C_MAGENTA}[DRY-RUN]${C_RESET} " || true
+    [[ $VERBOSE -eq 1 ]] && modes+="${C_BLUE}[VERBOSE]${C_RESET} " || true
+    [[ $AUTO_MODE -eq 1 ]] && modes+="${C_YELLOW}[AUTO]${C_RESET} " || true
+    [[ -n "$modes" ]] && echo -e "  Modes: $modes" && echo "" || true
 }
 
 print_summary() {
@@ -168,13 +168,21 @@ show_help() {
     echo -e "  ${C_GREEN}5.${C_RESET} Hardens SSH (disables password auth & root login)"
     echo -e "  ${C_GREEN}6.${C_RESET} Configures fail2ban for brute-force protection"
     echo -e "  ${C_GREEN}7.${C_RESET} Sets up UFW firewall rules"
-    echo -e "  ${C_GREEN}8.${C_RESET} Optional: Installs Tailscale VPN"
+    echo -e "  ${C_GREEN}8.${C_RESET} Optional: Installs Tailscale VPN (with exit node support)"
     echo -e "  ${C_GREEN}9.${C_RESET} Reloads SSH to apply changes"
+    echo ""
+    echo -e "${C_BOLD}${C_YELLOW}TAILSCALE SETUP${C_RESET}"
+    echo -e "  In interactive mode, the script will:"
+    echo -e "  ${ICON_BULLET} Ask if you want to configure as an exit node"
+    echo -e "  ${ICON_BULLET} Enable IP forwarding if needed"
+    echo -e "  ${ICON_BULLET} Prompt for an auth key (get one from Tailscale admin)"
+    echo -e "  ${ICON_BULLET} Auto-configure with: ${C_DIM}--advertise-exit-node --accept-routes --ssh${C_RESET}"
     echo ""
     echo -e "${C_BOLD}${C_YELLOW}REQUIREMENTS${C_RESET}"
     echo -e "  ${ICON_BULLET} Ubuntu 20.04, 22.04, or 24.04"
     echo -e "  ${ICON_BULLET} Root privileges or passwordless sudo"
     echo -e "  ${ICON_BULLET} SSH key already configured for at least one user"
+    echo -e "  ${ICON_BULLET} ${C_DIM}(Optional) Tailscale auth key for automated setup${C_RESET}"
     echo ""
     exit 0
 }
@@ -936,47 +944,168 @@ do_ufw_config() {
 # STEP 8: TAILSCALE VPN (Optional)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-do_tailscale_setup() {
-    print_step "8" "Tailscale VPN (Optional)"
+enable_ip_forwarding() {
+    # Enable IP forwarding for Tailscale exit node functionality
+    local sysctl_conf="/etc/sysctl.conf"
     
-    if command -v tailscale &>/dev/null; then
-        print_success "Tailscale is already installed"
-        
-        local ts_status
-        ts_status=$($SUDO tailscale status --self 2>/dev/null || echo "not connected")
-        
-        if echo "$ts_status" | grep -q "offers exit node"; then
-            print_verbose "Tailscale is connected"
-        else
-            print_info "Run 'sudo tailscale up' to connect to your tailnet"
-        fi
+    # Check if already enabled
+    if sysctl net.ipv4.ip_forward 2>/dev/null | grep -q "= 1"; then
+        print_verbose "IP forwarding already enabled"
         return 0
     fi
     
-    if prompt_yn "Would you like to install Tailscale VPN?" "no"; then
+    print_info "Enabling IP forwarding for exit node..."
+    
+    if [[ $DRY_RUN -eq 1 ]]; then
+        print_dry "Would enable net.ipv4.ip_forward = 1"
+        return 0
+    fi
+    
+    # Add to sysctl.conf if not present
+    if ! $SUDO grep -q "^net.ipv4.ip_forward" "$sysctl_conf" 2>/dev/null; then
+        echo 'net.ipv4.ip_forward = 1' | $SUDO tee -a "$sysctl_conf" > /dev/null
+    else
+        $SUDO sed -i 's/^net.ipv4.ip_forward.*/net.ipv4.ip_forward = 1/' "$sysctl_conf"
+    fi
+    
+    # Also enable IPv6 forwarding
+    if ! $SUDO grep -q "^net.ipv6.conf.all.forwarding" "$sysctl_conf" 2>/dev/null; then
+        echo 'net.ipv6.conf.all.forwarding = 1' | $SUDO tee -a "$sysctl_conf" > /dev/null
+    fi
+    
+    # Apply immediately
+    $SUDO sysctl -p > /dev/null 2>&1 || true
+    print_success "IP forwarding enabled"
+}
+
+do_tailscale_setup() {
+    print_step "8" "Tailscale VPN (Optional)"
+    
+    local tailscale_installed=0
+    local tailscale_connected=0
+    
+    if command -v tailscale &>/dev/null; then
+        tailscale_installed=1
+        
+        local ts_status
+        ts_status=$($SUDO tailscale status --self 2>&1 || echo "")
+        
+        # Check if connected (has an IP address in output)
+        if echo "$ts_status" | grep -qE "^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"; then
+            tailscale_connected=1
+            print_success "Tailscale is already installed and connected"
+            
+            if echo "$ts_status" | grep -q "offers exit node"; then
+                print_verbose "Configured as exit node"
+            fi
+            return 0
+        else
+            print_success "Tailscale is installed but not connected"
+        fi
+    fi
+    
+    # If not installed, ask to install
+    if [[ $tailscale_installed -eq 0 ]]; then
+        if ! prompt_yn "Would you like to install Tailscale VPN?" "no"; then
+            print_info "Skipping Tailscale installation"
+            return 0
+        fi
+        
         print_info "Installing Tailscale..."
         
         if [[ $DRY_RUN -eq 1 ]]; then
             print_dry "Would download and run Tailscale installer"
-        else
-            # Download and install
-            if curl -fsSL https://tailscale.com/install.sh | $SUDO sh; then
-                print_success "Tailscale installed"
-                
-                # Add firewall rule
-                $SUDO ufw allow 41641/udp comment 'Tailscale' 2>/dev/null || true
-                
-                echo ""
-                echo -e "  ${C_BOLD}Next steps:${C_RESET}"
-                echo -e "    1. Run: ${C_CYAN}sudo tailscale up${C_RESET}"
-                echo -e "    2. Authenticate in your browser"
-                echo -e "    3. (Optional) Enable SSH: ${C_CYAN}sudo tailscale up --ssh${C_RESET}"
-            else
-                print_error "Tailscale installation failed"
+            print_dry "Would prompt for auth key and configure as exit node"
+            return 0
+        fi
+        
+        # Download and install
+        if ! curl -fsSL https://tailscale.com/install.sh | $SUDO sh; then
+            print_error "Tailscale installation failed"
+            return 1
+        fi
+        
+        print_success "Tailscale installed"
+        
+        # Add firewall rule
+        $SUDO ufw allow 41641/udp comment 'Tailscale' 2>/dev/null || true
+    fi
+    
+    # At this point, Tailscale is installed but not connected
+    # Offer to configure it
+    if [[ $DRY_RUN -eq 1 ]]; then
+        print_dry "Would prompt for Tailscale configuration"
+        return 0
+    fi
+    
+    if ! prompt_yn "Would you like to configure Tailscale now?" "yes"; then
+        echo ""
+        echo -e "  ${C_BOLD}Manual setup:${C_RESET}"
+        echo -e "    ${C_CYAN}sudo tailscale up --advertise-exit-node --accept-routes --ssh${C_RESET}"
+        return 0
+    fi
+    
+    # Ask about exit node setup
+    local setup_exit_node=0
+    if prompt_yn "Configure this server as a Tailscale exit node?" "yes"; then
+        setup_exit_node=1
+        enable_ip_forwarding
+    fi
+    
+    # Prompt for auth key in interactive mode
+    echo ""
+    echo -e "  ${C_BOLD}Tailscale Authentication:${C_RESET}"
+    echo -e "  ${C_DIM}Get an auth key from: https://login.tailscale.com/admin/settings/keys${C_RESET}"
+    echo ""
+    
+    local auth_key=""
+    if [[ $AUTO_MODE -eq 0 ]]; then
+        read -r -p "  Enter Tailscale auth key (or press Enter to skip): " auth_key || auth_key=""
+    fi
+    
+    if [[ -n "$auth_key" ]]; then
+        # Validate auth key format (starts with tskey-)
+        if [[ ! "$auth_key" =~ ^tskey- ]]; then
+            print_warning "Auth key should start with 'tskey-'. Proceeding anyway..."
+        fi
+        
+        print_info "Connecting to Tailscale..."
+        print_info "(You may need to approve the device in your browser)"
+        
+        # Build command with proper quoting
+        local ts_cmd="tailscale up --authkey=\"$auth_key\" --accept-routes --ssh"
+        if [[ $setup_exit_node -eq 1 ]]; then
+            ts_cmd="$ts_cmd --advertise-exit-node"
+        fi
+        
+        # Execute with eval to handle the quoting correctly
+        if $SUDO bash -c "$ts_cmd"; then
+            print_success "Tailscale connected successfully"
+            
+            # Show connection info
+            local ts_ip
+            ts_ip=$($SUDO tailscale ip -4 2>/dev/null || echo "")
+            if [[ -n "$ts_ip" ]]; then
+                echo -e "    ${ICON_BULLET} Tailscale IP: ${C_CYAN}${ts_ip}${C_RESET}"
             fi
+            
+            if [[ $setup_exit_node -eq 1 ]]; then
+                echo -e "    ${ICON_BULLET} Exit node: ${C_GREEN}advertised${C_RESET}"
+                echo -e "    ${C_DIM}  (Enable in Tailscale admin console to use)${C_RESET}"
+            fi
+        else
+            print_error "Failed to connect to Tailscale"
+            print_info "Try manually: sudo tailscale up"
         fi
     else
-        print_info "Skipping Tailscale installation"
+        echo ""
+        echo -e "  ${C_BOLD}Manual setup required:${C_RESET}"
+        if [[ $setup_exit_node -eq 1 ]]; then
+            echo -e "    ${C_CYAN}sudo tailscale up --advertise-exit-node --accept-routes --ssh${C_RESET}"
+        else
+            echo -e "    ${C_CYAN}sudo tailscale up --accept-routes --ssh${C_RESET}"
+        fi
+        echo -e "  ${C_DIM}Then authenticate in your browser${C_RESET}"
     fi
 }
 
