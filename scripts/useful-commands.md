@@ -3,6 +3,7 @@
 - [Useful commands](#useful-commands)
   - [Ubuntu](#ubuntu)
     - [Check who's trying to connect to ssh](#check-whos-trying-to-connect-to-ssh)
+    - [Unban self from fail2ban](#unban-self-from-fail2ban)
   - [Github](#github)
     - [Signing](#signing)
       - [Confirm commit are signed](#confirm-commit-are-signed)
@@ -14,8 +15,13 @@
 ### Check who's trying to connect to ssh
 `sudo grep "Failed" /var/log/auth.log | tail -20`
 
+
 > [!NOTE]
 > Block access to port 22, or disable root login
+
+### Unban self from fail2ban
+`sudo fail2ban-client set sshd unbanip YOUR_IP`
+
 
 ## Github
 
