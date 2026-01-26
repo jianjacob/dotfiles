@@ -204,6 +204,27 @@ parse_args() {
     done
 }
 
+# Check if running in interactive mode
+check_interactive() {
+    # If auto mode is explicitly set, skip interactive check
+    if [[ $AUTO_MODE -eq 1 ]]; then
+        return 0
+    fi
+    
+    # Check if stdin is connected to a terminal
+    if [[ ! -t 0 ]]; then
+        print_warning "Stdin is not connected to a terminal (non-interactive environment)"
+        print_warning "Interactive prompts will not work. Automatically enabling --auto mode with safe defaults."
+        print_info "To suppress this warning, use --auto flag explicitly when running the script"
+        echo ""
+        AUTO_MODE=1
+        return 0
+    fi
+    
+    # Interactive mode is available
+    return 0
+}
+
 # Determine sudo prefix
 setup_sudo() {
     if [[ "$EUID" -eq 0 ]]; then
@@ -1075,7 +1096,7 @@ do_tailscale_setup() {
     if [[ $should_configure -eq 0 ]]; then
         echo ""
         echo -e "  ${C_BOLD}Manual setup:${C_RESET}"
-        echo -e "    ${C_CYAN}sudo tailscale up --advertise-exit-node --accept-routes --ssh${C_RESET}"
+        echo -e "    ${C_CYAN}sudo tailscale up --advertise-exit-node --accept-routes --accept-dns=false --ssh${C_RESET}"
         return 0
     fi
     
@@ -1137,15 +1158,15 @@ do_tailscale_setup() {
             fi
         else
             print_error "Failed to connect to Tailscale"
-            print_info "Try manually: sudo tailscale up"
+            print_info "Try manually: sudo tailscale up --accept-dns=false [..other options..]"
         fi
     else
         echo ""
         echo -e "  ${C_BOLD}Manual setup required:${C_RESET}"
         if [[ $setup_exit_node -eq 1 ]]; then
-            echo -e "    ${C_CYAN}sudo tailscale up --advertise-exit-node --accept-routes --ssh${C_RESET}"
+            echo -e "    ${C_CYAN}sudo tailscale up --advertise-exit-node --accept-routes --accept-dns=false --ssh${C_RESET}"
         else
-            echo -e "    ${C_CYAN}sudo tailscale up --accept-routes --ssh${C_RESET}"
+            echo -e "    ${C_CYAN}sudo tailscale up --accept-routes --accept-dns=false --ssh${C_RESET}"
         fi
         echo -e "  ${C_DIM}Then authenticate in your browser${C_RESET}"
     fi
@@ -1263,6 +1284,7 @@ do_final_audit() {
 
 main() {
     parse_args "$@"
+    check_interactive
     setup_sudo
     
     print_banner
