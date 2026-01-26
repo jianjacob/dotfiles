@@ -241,10 +241,12 @@ prompt_yn() {
     local response
     if [[ "$default" == "yes" ]]; then
         read -r -p "$prompt [Y/n]: " response || response=""
-        [[ -z "$response" || "$response" =~ ^[Yy] ]]
+        # Match empty, "y", "yes" (case insensitive)
+        [[ -z "$response" || "$response" =~ ^[Yy]([Ee][Ss])?$ ]]
     else
         read -r -p "$prompt [y/N]: " response || response=""
-        [[ "$response" =~ ^[Yy] ]]
+        # Match "y" or "yes" (case insensitive)
+        [[ "$response" =~ ^[Yy]([Ee][Ss])?$ ]]
     fi
 }
 
@@ -285,7 +287,9 @@ check_ubuntu_version() {
             ;;
         *)
             print_warning "Ubuntu $version detected - may not be fully tested"
-            if ! prompt_yn "Continue anyway?" "no"; then
+            if [[ $AUTO_MODE -eq 1 ]]; then
+                print_warning "Auto mode: continuing with untested Ubuntu version"
+            elif ! prompt_yn "Continue anyway?" "no"; then
                 exit 1
             fi
             ;;
@@ -691,9 +695,12 @@ do_user_handling() {
             exit 1
         fi
         
-        if ! echo "$ssh_key" | grep -qE "^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp|ssh-dss)\s+[A-Za-z0-9+/=]+"; then
+        # Validate SSH key format - allow keys with options prefix (e.g., "no-port-forwarding ssh-rsa...")
+        # or just the key type and data
+        if ! echo "$ssh_key" | grep -qE "(^|[[:space:]])(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp|ssh-dss)\s+[A-Za-z0-9+/=]+"; then
             print_error "Invalid SSH key format."
             print_info "Expected format: ssh-ed25519 AAAA... or ssh-rsa AAAA..."
+            print_info "Keys with options are also supported (e.g., no-port-forwarding ssh-rsa...)"
             exit 1
         fi
         
@@ -1006,7 +1013,21 @@ do_tailscale_setup() {
     
     # If not installed, ask to install
     if [[ $tailscale_installed -eq 0 ]]; then
-        if ! prompt_yn "Would you like to install Tailscale VPN?" "no"; then
+        local should_install=0
+        if [[ $AUTO_MODE -eq 1 ]]; then
+            # In auto mode, install if TAILSCALE_AUTH_KEY is provided
+            if [[ -n "${TAILSCALE_AUTH_KEY:-}" ]]; then
+                should_install=1
+                print_info "Auto mode: Installing Tailscale (TAILSCALE_AUTH_KEY provided)"
+            else
+                print_info "Auto mode: Skipping Tailscale installation (set TAILSCALE_AUTH_KEY to enable)"
+                return 0
+            fi
+        elif prompt_yn "Would you like to install Tailscale VPN?" "no"; then
+            should_install=1
+        fi
+        
+        if [[ $should_install -eq 0 ]]; then
             print_info "Skipping Tailscale installation"
             return 0
         fi
@@ -1038,7 +1059,20 @@ do_tailscale_setup() {
         return 0
     fi
     
-    if ! prompt_yn "Would you like to configure Tailscale now?" "yes"; then
+    local should_configure=0
+    if [[ $AUTO_MODE -eq 1 ]]; then
+        # In auto mode, configure if TAILSCALE_AUTH_KEY is provided
+        if [[ -n "${TAILSCALE_AUTH_KEY:-}" ]]; then
+            should_configure=1
+        else
+            print_info "Auto mode: Skipping Tailscale configuration (set TAILSCALE_AUTH_KEY to enable)"
+            return 0
+        fi
+    elif prompt_yn "Would you like to configure Tailscale now?" "yes"; then
+        should_configure=1
+    fi
+    
+    if [[ $should_configure -eq 0 ]]; then
         echo ""
         echo -e "  ${C_BOLD}Manual setup:${C_RESET}"
         echo -e "    ${C_CYAN}sudo tailscale up --advertise-exit-node --accept-routes --ssh${C_RESET}"
@@ -1059,7 +1093,15 @@ do_tailscale_setup() {
     echo ""
     
     local auth_key=""
-    if [[ $AUTO_MODE -eq 0 ]]; then
+    if [[ $AUTO_MODE -eq 1 ]]; then
+        # In auto mode, check for auth key from environment variable
+        if [[ -n "${TAILSCALE_AUTH_KEY:-}" ]]; then
+            auth_key="${TAILSCALE_AUTH_KEY}"
+            print_info "Using Tailscale auth key from TAILSCALE_AUTH_KEY environment variable"
+        else
+            print_info "Auto mode: Skipping Tailscale configuration (set TAILSCALE_AUTH_KEY env var to enable)"
+        fi
+    else
         read -r -p "  Enter Tailscale auth key (or press Enter to skip): " auth_key || auth_key=""
     fi
     
@@ -1072,14 +1114,14 @@ do_tailscale_setup() {
         print_info "Connecting to Tailscale..."
         print_info "(You may need to approve the device in your browser)"
         
-        # Build command with proper quoting
-        local ts_cmd="tailscale up --authkey=\"$auth_key\" --accept-routes --ssh"
+        # Build command array to safely pass auth key
+        local ts_args=("tailscale" "up" "--authkey" "$auth_key" "--accept-routes" "--ssh")
         if [[ $setup_exit_node -eq 1 ]]; then
-            ts_cmd="$ts_cmd --advertise-exit-node"
+            ts_args+=("--advertise-exit-node")
         fi
         
-        # Execute with eval to handle the quoting correctly
-        if $SUDO bash -c "$ts_cmd"; then
+        # Execute with array to avoid shell injection
+        if $SUDO "${ts_args[@]}"; then
             print_success "Tailscale connected successfully"
             
             # Show connection info
