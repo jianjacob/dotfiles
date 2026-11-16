@@ -1,3 +1,4 @@
+DEPRECATED
 This directory is not committed.
 Used for:
 - SSH keys
